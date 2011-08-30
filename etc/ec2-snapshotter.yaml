@@ -1,0 +1,27 @@
+---
+volumes-source: metadata
+#volumes-source: config
+#volumes:
+#    - vol-XXXXXX
+#    - vol-YYYYYY
+#
+snapshot_schedule:
+#    vol-XXXXXX:
+#        min_hours: 6
+    *:
+        days: 1
+purge_schedule:
+#    vol-YYYYYY:
+#        hours: 2
+#        days: 5
+#        weeks: 4
+#        months: 3
+    *:
+        days: 2
+        weeks: 2
+        months: 1
+awsregion: us-west-1
+#sns_notify: arn:aws:sns:us-east-1:############:topic-name
+auth:
+    accesskey: foo
+    secretkey: bar

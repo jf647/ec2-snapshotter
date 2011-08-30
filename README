@@ -1,0 +1,79 @@
+ec2-snapshotter
+---------------
+
+This is a utility to create and maintain snapshots of one or more ec2
+volumes based on a schedule defined in a config file.
+
+System Requirements
+-------------------
+
+- perl v5.10
+  - Net::Amazon::EC2
+  - Amazon::SNS (only if SNS notifications are configured)
+  - YAML
+
+Configuration
+-------------
+
+A sample configuration is in the etc directory.  You need to configure
+
+- the AWS region
+- your accesskey
+- your secretkey
+- the volume source
+- the volumes (if volume source is 'config')
+- the snapshot schedule (for the wildcard at least, but optionally for specific volumes)
+- the purge schedule (for the wildcard at least, but optionally for specific volumes)
+
+configure the instance ID in the configuration by setting instance-id-source
+to 'config' and setting instance-id to the ID to use.  This allows you to
+use ec2-snapshotter from somewhere other than the EC2 instance whose volumes
+you are working with.
+
+Snapshot Schedule
+-----------------
+
+The snapshot schedule must be defined either for specific volumes or for the
+wildcard entry *.  If a snapshot schedule cannot be found for a volume
+(either defined in the config or discovered via metadata) then the script
+will abort.
+
+The schedule can contain one of the keys minutes, hours or days.  If the
+newest snapshot is older than the schedule, a new snapshot will be taken.
+
+Purge Schedule
+--------------
+
+The purge schedule must be defined in the same manner as the snapshot
+schedule.
+
+The schedule can contain one or more of the keys hours, days, weeks or
+months, with the values being the number of snapshots to keep for that
+timeframe.  If more than one snapshot fits within the timeframe, the newest
+snapshots are retained.  Anything that does not fit within the configured
+number of snapshots per timeframe will be removed.
+
+Usage
+-----
+
+./ec2-snapshotter [--configfile file] [--verbose] [--debug]
+
+  configfile defaults to $FindBin::Bin/../etc/ec2-elasticizer.yaml
+  verbose is off by default and adds some additional output to the script
+  debug turns on Net::Amazon::EC2 debug logging
+
+SNS Notifications
+-----------------
+
+If a value is given for 'sns_notify' in the configuration, a brief
+notification message will be sent to that topic via Amazon SNS.
+
+Credits
+-------
+
+I am indebted to the author of https://github.com/stiang/ec2-purge-snapshots
+for the snapshot purge algorithm.  My reimplementation of this algorithm is
+drive by a desire to do it in Perl rather than Ruby so that I can make
+additional enhancements, and the fact that I wanted something that created
+the snapshots as well.
+
