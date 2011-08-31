@@ -4,24 +4,37 @@ volumes-source: metadata
 #volumes:
 #    - vol-XXXXXX
 #    - vol-YYYYYY
-#
 snapshot_schedule:
-#    vol-XXXXXX:
-#        min_hours: 6
-    *:
+    '*':
         days: 1
+#    vol-XXXXXX:
+#        hours: 6
 purge_schedule:
+    '*':
+        days: 2
+        weeks: 2
+        months: 1
 #    vol-YYYYYY:
 #        hours: 2
 #        days: 5
 #        weeks: 4
 #        months: 3
-    *:
-        days: 2
-        weeks: 2
-        months: 1
 awsregion: us-west-1
 #sns_notify: arn:aws:sns:us-east-1:############:topic-name
 auth:
     accesskey: foo
     secretkey: bar
+logging:
+    log4perl.appender.Screen: Log::Log4perl::Appender::Screen
+    log4perl.appender.Screen.layout: Log::Log4perl::Layout::PatternLayout
+    log4perl.appender.Screen.stderr: 0
+    log4perl.appender.Screen.layout.ConversionPattern: '%d [%-5p] %c %m%n'
+    log4perl.appender.System: Log::Log4perl::Appender::File
+    log4perl.appender.System.filename: /var/log/ec2-snapshotter.log
+    log4perl.appender.System.layout: Log::Log4perl::Layout::PatternLayout
+    log4perl.appender.System.layout.ConversionPattern: '%d [%-5p] %c %m%n'
+#    log4perl.appender.System: Log::Dispatch::Syslog
+#    log4perl.appender.System.min_level: debug
+#    log4perl.appender.System.ident: ec2-snapshotter
+#    log4perl.appender.System.layout: Log::Log4perl::Layout::PatternLayout
+#    log4perl.appender.System.layout.ConversionPattern: '%c %m%n'

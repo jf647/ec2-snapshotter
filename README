@@ -8,9 +8,12 @@ System Requirements
 -------------------
 
 - perl v5.10
+  - DateTime::Format::RFC3339
+  - DateTime::Format::Duration
+  - Log::Log4perl
   - Net::Amazon::EC2
-  - Amazon::SNS (only if SNS notifications are configured)
   - YAML
+  - Amazon::SNS (only if SNS notifications are configured)
 
 Configuration
 -------------
@@ -24,11 +27,6 @@ A sample configuration is in the etc directory.  You need to configure
 - the volumes (if volume source is 'config')
 - the snapshot schedule (for the wildcard at least, but optionally for specific volumes)
 - the purge schedule (for the wildcard at least, but optionally for specific volumes)
-
-configure the instance ID in the configuration by setting instance-id-source
-to 'config' and setting instance-id to the ID to use.  This allows you to
-use ec2-snapshotter from somewhere other than the EC2 instance whose volumes
-you are working with.
 
 Snapshot Schedule
 -----------------

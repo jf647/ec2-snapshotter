@@ -1,0 +1,199 @@
+#!/usr/bin/perl
+#
+
+use strict;
+use warnings;
+
+use FindBin;
+use DateTime::Format::RFC3339;
+use DateTime::Format::Duration;
+use Getopt::Long;
+use Log::Log4perl;
+use LWP::UserAgent;
+use Net::Amazon::EC2;
+use YAML 'LoadFile';
+
+my %o = (
+    configfile => "$FindBin::Bin/../etc/ec2-snapshotter.yaml",
+    verbose => 0,
+    debug => 0,
+    ec2debug => 0,
+    trace => 0,
+    force => 0,
+);
+GetOptions(
+    \%o,
+    "configfile=s",
+    "verbose!",
+    "debug!",
+    "ec2debug!",
+    "trace!",
+    "force!",
+) or die "can't parse command line!";
+die "can't parse command line!" if( @ARGV );
+
+# load our config
+my $cfg = LoadFile( $o{configfile} )
+    or die "can't load config $o{configfile}!";
+
+# init logging
+my $logcfg = $cfg->{logging};
+my $loglevel = 'INFO';
+my $logchannel = 'System';
+if( $o{debug} ) {
+    $loglevel = 'DEBUG';
+}
+if( $o{trace} ) {
+    $loglevel = 'TRACE';
+}
+if( $o{verbose} ) {
+    $logchannel = 'System, Screen';
+}
+$logcfg->{logger} = "$loglevel, $logchannel";
+Log::Log4perl->init( $logcfg );
+my $log = Log::Log4perl->get_logger;
+$log->info('START');
+
+# create an EC2 connection
+$log->debug("creating EC2 connection");
+my $ec2 = Net::Amazon::EC2->new(
+    AWSAccessKeyId => $cfg->{auth}->{accesskey},
+    SecretAccessKey => $cfg->{auth}->{secretkey},
+    region => $cfg->{awsregion},
+    debug => $o{ec2debug},
+) or $log->logdie("can't instantiate EC2 interface!");
+$log->trace("created EC2 connection");
+
+# create a web agent
+my $ua = LWP::UserAgent->new;
+
+# create a time parser
+my $now = DateTime->now( time_zone => 'local' );
+my $f = DateTime::Format::RFC3339->new;
+my $d = DateTime::Format::Duration->new(
+    pattern => '%Y years, %m months, %e days, %H hours, %M minutes',
+);
+
+# create a SNS connection if required
+my $sns;
+my $topic;
+if( exists $cfg->{sns_notify} ) {
+    eval "require Amazon::SNS";
+    if( $@ ) {
+        $log->logdie("unable to load Amazon::SNS: $@");
+    }
+    $log->debug("creating SNS connection");
+    $sns = Amazon::SNS->new( {
+        key => $cfg->{auth}->{accesskey},
+        secret => $cfg->{auth}->{secretkey},
+        service => "http://sns.$cfg->{awsregion}.amazonaws.com",
+    } ) or $log->logdie("can't instantiate SNS interface!");
+    $log->trace("created SNS connection");
+    $log->debug("getting handle on SNS topic $cfg->{sns_notify}");
+    $topic = $sns->GetTopic( $cfg->{sns_notify} )
+        or $log->logdie("can't get handle on topic '$cfg->{sns_notify}'!");
+    $log->trace("got handle on SNS topic $cfg->{sns_notify}");
+}
+
+# get a list of all our snapshots
+my $snaps = get_snaps();
+
+# get the list of volume IDs to operate on
+my @volids;
+if( 'config' eq $cfg->{'volumes-source'} ) {
+    @volids = @{ $cfg->{volumes} };
+}
+else {
+    $log->logdie("volume source method '$cfg->{'volumes-source'}' is not supported!");
+}
+
+# for each volume, make sure we've made a snapshot within the required timeframe
+my $refresh_snaps = 0;
+for my $volid( @volids ) {
+
+    $log->info("processing volume $volid");
+
+    # get our snapshot schedule
+    my $snapcfg = $cfg->{snapshot_schedule}->{$volid} || $cfg->{snapshot_schedule}->{'*'}
+        || $log->logdie("can't get snapshot schedule for volume id '$volid'!");
+
+    # validate the volume
+    $log->debug("validating volume $volid");
+    my $vol = $ec2->describe_volumes( VolumeId => $volid );
+    if( 'Net::Amazon::EC2::Errors' eq ref $vol ) {
+        error( describe_volumes => $vol );
+    }
+    $log->trace("validated volume $volid");
+
+    # find the newest snapshot
+    my $newest_snaptime;
+    my $newest_snap;
+    for my $snap( @$snaps ) {
+        next unless( $snap->volume_id eq $volid );
+        next if( 'error' eq $snap->status );
+        $log->debug("considering snapshot ", $snap->snapshot_id);
+        my $snaptime = $f->parse_datetime( $snap->start_time );
+        $log->debug("snapshot is in ", $snap->status, " status and was started at ", $snaptime);
+        if( ! defined $newest_snaptime || $snaptime > $newest_snaptime ) {
+            $newest_snaptime = $snaptime;
+            $newest_snap = $snap->snapshot_id;
+            $log->trace("this is now the newest snapshot");
+        }
+    }
+    
+    # is our newest snapshot too old?
+    my $age = $now - $newest_snaptime;
+    my $maxage = DateTime::Duration->new( $snapcfg );
+    $log->debug("newest snapshot is ", $d->format_duration( $age ), " old");
+    $log->debug("oldest snapshot allowed is ", $d->format_duration( $maxage ));
+    if( $now - $age < $now - $maxage ) {
+        $log->info("newest snapshot is too old - creating a new one");
+        my $newsnap = $ec2->create_snapshot( VolumeId => $volid, Description => 'ec2-snapshotter' );
+        $log->info("created snapshot ", $newsnap->snapshot_id);
+        $refresh_snaps = 1;
+        if( $topic ) {
+            $log->debug("publishing to SNS topic");
+            my $date = scalar localtime( time );
+            $topic->Publish("created snapshot " . $newsnap->snapshot_id . " of '$volid' at $date");
+            $log->trace("published to SNS topic");
+        }        
+    }
+
+}
+
+if( $refresh_snaps ) {
+    $snaps = get_snaps();
+}
+
+# all done
+$log->info('STOP');
+exit(0);
+
+# dump EC2 errors
+sub error
+{
+
+    my $method = shift;
+    my $errors = shift;
+
+    for my $error( @{ $errors->errors } ) {
+        $log->error("\t", $error->code, ": ", $error->message);
+    }
+    $log->logdie("can't call $method!");
+
+}
+
+sub get_snaps
+{
+
+    $log->debug("getting snapshot info");
+    my $snaps = $ec2->describe_snapshots( Owner => 'self' );
+    if( 'Net::Amazon::EC2::Errors' eq ref $snaps ) {
+        error( describe_snapshots => $snaps );
+    }
+    return $snaps;
+
+}
+
+#
+# EOF
