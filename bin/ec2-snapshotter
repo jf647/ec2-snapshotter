@@ -133,6 +133,7 @@ for my $volid( @volids ) {
         next if( 'error' eq $snap->status );
         $log->debug("considering snapshot ", $snap->snapshot_id);
         my $snaptime = $f->parse_datetime( $snap->start_time );
+        $snaptime->set_time_zone( 'local' );
         $log->debug("snapshot is in ", $snap->status, " status and was started at ", $snaptime);
         if( ! defined $newest_snaptime || $snaptime > $newest_snaptime ) {
             $newest_snaptime = $snaptime;
@@ -142,11 +143,10 @@ for my $volid( @volids ) {
     }
     
     # is our newest snapshot too old?
-    my $age = $now - $newest_snaptime;
-    my $maxage = DateTime::Duration->new( $snapcfg );
-    $log->debug("newest snapshot is ", $d->format_duration( $age ), " old");
-    $log->debug("oldest snapshot allowed is ", $d->format_duration( $maxage ));
-    if( $now - $age < $now - $maxage ) {
+    my $maxage = $now - DateTime::Duration->new( $snapcfg );
+    $log->debug("newest snapshot is dated $newest_snaptime");
+    $log->debug("oldest allowed snapshot date is $maxage");
+    if( $newest_snaptime < $maxage ) {
         $log->info("newest snapshot is too old - creating a new one");
         my $newsnap = $ec2->create_snapshot( VolumeId => $volid, Description => 'ec2-snapshotter' );
         $log->info("created snapshot ", $newsnap->snapshot_id);
@@ -168,13 +168,12 @@ if( $refresh_snaps ) {
 # build a list of volumes and their snapshots, sorted by starttime
 my $vol_to_snap;
 for my $snap( @$snaps ) {
-    $log->trace("considering snapshot ", $snap->snapshot_id);
     my $snapinfo = {
         snapshot_id => $snap->snapshot_id,
         volume_id => $snap->volume_id,
         start_time => $f->parse_datetime( $snap->start_time ),
     };
-    $snapinfo->{age} = $now - $snapinfo->{start_time};
+    $snapinfo->{start_time}->set_time_zone( 'local' );
     push @{ $vol_to_snap->{$snap->volume_id} }, $snapinfo;
 }
 for my $volid( keys %$vol_to_snap ) {
@@ -194,32 +193,34 @@ for my $volid( keys %$vol_to_snap ) {
     my $start_weeks_after = $purgecfg->{hours} + ( $purgecfg->{days} * 24 );
     my $start_months_after = $start_weeks_after + ( $purgecfg->{weeks} * 24 * 7 );
     for my $snapinfo( @{ $vol_to_snap->{$volid} } ) {
-        my $hours = $snapinfo->{age}->in_units('hours');
-        $log->trace("snapshot age in hours is $hours");
+        $log->debug("considering snapshot $snapinfo->{snapshot_id} dated $snapinfo->{start_time}");
+        my $snap_age_h = int( ( $now->epoch - $snapinfo->{start_time}->epoch ) / (60 * 60) );
+        my $snap_age_d = int( ( $now->epoch - $snapinfo->{start_time}->epoch ) / (24 * 60 * 60) );
+        $log->trace("snapshot age in hours is $snap_age_h; in days $snap_age_d");
         my $type;
-        my $keep_count;
+        my $keep_count = 0;
         my $start_date;
-        my $prev_start_date = DateTime->from_epoch( time_zone => local, epoch => 0 );
-        if( $hours > $purgecfg->{hours} ) {
-            if( $hours <= $start_weeks_after ) {
+        my $prev_start_date = DateTime->from_epoch( time_zone => 'local', epoch => 0 )->strftime('%Y-%m-%d');
+        if( $snap_age_h > $purgecfg->{hours} ) {
+            if( $snap_age_h <= $start_weeks_after ) {
                 $type = 'days';
-                $start_date = $snapinfo->{start_time};
+                $start_date = $snapinfo->{start_time}->strftime('%Y-%m-%d');
             }
             else {
-                if( $hours <= $start_months_after ) {
+                if( $snap_age_h <= $start_months_after ) {
                     $type = 'weeks';
-                    my $week_day = $snapinfo->{start_time}->dow;
-                    $start_date = $snapinfo->{start_time} - DateTime::Duration->days( $snapinfo->{start_time}->dow );
+                    my $dt = $snapinfo->{start_time} - DateTime::Duration->new( days => $snapinfo->{start_time}->dow );
+                    $start_date = $dt->strftime('%Y-%m-%d');
                 }
                 else {
                     $type = 'months';
-                    $start_date = $snapinfo->{start_time}->clone->truncate( to => 'month' );
+                    my $dt = $snapinfo->{start_time}->clone->truncate( to => 'month' );
+                    $start_date = $dt->strftime('%Y-%m-%d');
                 }
             }
-            if( $start_date != $prev_start_date ) {
+            if( $start_date ne $prev_start_date ) {
                 $prev_start_date = $start_date;
-                my $agestr = $snapinfo->{age}->in_units( $type );
-                $log->debug("keeping snapshot $snapinfo->{snapshot_id}; $agestr $type old (min $type $purgecfg->{$type})");
+                $log->debug("keeping snapshot $snapinfo->{snapshot_id}; $snap_age_d days old; keeping for the $type of $start_date");
                 $keep_count++;
             }
             else {
@@ -228,14 +229,13 @@ for my $volid( keys %$vol_to_snap ) {
                     $keep_count++;
                 }
                 else {
-                    my $days = $snapinfo->{age}->in_units('days');
-                    $log->info("deleting snapshot $snapinfo->{snapshot_id}; $days days old");
+                    $log->info("deleting snapshot $snapinfo->{snapshot_id}; $snap_age_d days old");
                     push @to_del, $snapinfo->{snapshot_id};
                 }
             }
         }
         else {
-            $log->debug("keeping snapshot $snapinfo->{snapshot_id}; $hours hours old (min hours $purgecfg->{hours})");
+            $log->debug("keeping snapshot $snapinfo->{snapshot_id}; $snap_age_h hours old (min hours $purgecfg->{hours})");
             $keep_count++;
         }
     }
