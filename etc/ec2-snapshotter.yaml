@@ -11,6 +11,7 @@ snapshot_schedule:
 #        hours: 6
 purge_schedule:
     '*':
+        hours: 3
         days: 2
         weeks: 2
         months: 1

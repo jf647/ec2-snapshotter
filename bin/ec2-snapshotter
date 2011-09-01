@@ -165,6 +165,96 @@ if( $refresh_snaps ) {
     $snaps = get_snaps();
 }
 
+# build a list of volumes and their snapshots, sorted by starttime
+my $vol_to_snap;
+for my $snap( @$snaps ) {
+    $log->trace("considering snapshot ", $snap->snapshot_id);
+    my $snapinfo = {
+        snapshot_id => $snap->snapshot_id,
+        volume_id => $snap->volume_id,
+        start_time => $f->parse_datetime( $snap->start_time ),
+    };
+    $snapinfo->{age} = $now - $snapinfo->{start_time};
+    push @{ $vol_to_snap->{$snap->volume_id} }, $snapinfo;
+}
+for my $volid( keys %$vol_to_snap ) {
+    @{ $vol_to_snap->{$volid} } = sort { $a->{start_time} <=> $b->{start_time} } @{ $vol_to_snap->{$volid} };
+}
+
+# walk through the volumes, purging for each snapshot threshold
+$DB::single = 1;
+my @to_del;
+for my $volid( keys %$vol_to_snap ) {
+    my $purgecfg = $cfg->{purge_schedule}->{$volid} || $cfg->{purge_schedule}->{'*'}
+        || $log->logdie("can't get purge schedule for volume id '$volid'!");
+    $log->debug("purging for volume $volid");
+    my $newest = $vol_to_snap->{$volid}->[$#{ $vol_to_snap->{$volid} }]->{start_time};
+    my $newest_id = $vol_to_snap->{$volid}->[$#{ $vol_to_snap->{$volid} }]->{snapshot_id};
+    $log->debug("newest snapshot is $newest_id, dated ", $newest);
+    my $start_weeks_after = $purgecfg->{hours} + ( $purgecfg->{days} * 24 );
+    my $start_months_after = $start_weeks_after + ( $purgecfg->{weeks} * 24 * 7 );
+    for my $snapinfo( @{ $vol_to_snap->{$volid} } ) {
+        my $hours = $snapinfo->{age}->in_units('hours');
+        $log->trace("snapshot age in hours is $hours");
+        my $type;
+        my $keep_count;
+        my $start_date;
+        my $prev_start_date = DateTime->from_epoch( time_zone => local, epoch => 0 );
+        if( $hours > $purgecfg->{hours} ) {
+            if( $hours <= $start_weeks_after ) {
+                $type = 'days';
+                $start_date = $snapinfo->{start_time};
+            }
+            else {
+                if( $hours <= $start_months_after ) {
+                    $type = 'weeks';
+                    my $week_day = $snapinfo->{start_time}->dow;
+                    $start_date = $snapinfo->{start_time} - DateTime::Duration->days( $snapinfo->{start_time}->dow );
+                }
+                else {
+                    $type = 'months';
+                    $start_date = $snapinfo->{start_time}->clone->truncate( to => 'month' );
+                }
+            }
+            if( $start_date != $prev_start_date ) {
+                $prev_start_date = $start_date;
+                my $agestr = $snapinfo->{age}->in_units( $type );
+                $log->debug("keeping snapshot $snapinfo->{snapshot_id}; $agestr $type old (min $type $purgecfg->{$type})");
+                $keep_count++;
+            }
+            else {
+                if( $snapinfo->{snapshot_id} eq $newest_id ) {
+                    $log->debug("keeping snapshot $snapinfo->{snapshot_id}; will not delete newest snapshot");
+                    $keep_count++;
+                }
+                else {
+                    my $days = $snapinfo->{age}->in_units('days');
+                    $log->info("deleting snapshot $snapinfo->{snapshot_id}; $days days old");
+                    push @to_del, $snapinfo->{snapshot_id};
+                }
+            }
+        }
+        else {
+            $log->debug("keeping snapshot $snapinfo->{snapshot_id}; $hours hours old (min hours $purgecfg->{hours})");
+            $keep_count++;
+        }
+    }
+        
+}
+
+if( @to_del ) {
+    $log->debug("deleting snapshots @to_del");
+    $DB::single = 1;
+    my $rc = $ec2->delete_snapshot( SnapshotId => \@to_del );
+    $rc or error( delete_snapshot => $rc );
+    if( $topic ) {
+        $log->debug("publishing to SNS topic");
+        my $date = scalar localtime( time );
+        $topic->Publish("deleted snapshots @to_del at $date");
+        $log->trace("published to SNS topic");
+    }        
+}
+
 # all done
 $log->info('STOP');
 exit(0);
