@@ -68,7 +68,7 @@ $log->trace("created EC2 connection");
 my $ua = LWP::UserAgent->new;
 
 # create a time parser
-my $now = DateTime->now( time_zone => 'local' );
+my $now = DateTime->now;
 my $f = DateTime::Format::RFC3339->new;
 my $d = DateTime::Format::Duration->new(
     pattern => '%Y years, %m months, %e days, %H hours, %M minutes',
@@ -133,7 +133,6 @@ for my $volid( @volids ) {
         next if( 'error' eq $snap->status );
         $log->debug("considering snapshot ", $snap->snapshot_id);
         my $snaptime = $f->parse_datetime( $snap->start_time );
-        $snaptime->set_time_zone( 'local' );
         $log->debug("snapshot is in ", $snap->status, " status and was started at ", $snaptime);
         if( ! defined $newest_snaptime || $snaptime > $newest_snaptime ) {
             $newest_snaptime = $snaptime;
@@ -173,7 +172,6 @@ for my $snap( @$snaps ) {
         volume_id => $snap->volume_id,
         start_time => $f->parse_datetime( $snap->start_time ),
     };
-    $snapinfo->{start_time}->set_time_zone( 'local' );
     push @{ $vol_to_snap->{$snap->volume_id} }, $snapinfo;
 }
 for my $volid( keys %$vol_to_snap ) {
@@ -181,9 +179,8 @@ for my $volid( keys %$vol_to_snap ) {
 }
 
 # walk through the volumes, purging for each snapshot threshold
-$DB::single = 1;
 my @to_del;
-for my $volid( keys %$vol_to_snap ) {
+for my $volid( @volids ) {
     my $purgecfg = $cfg->{purge_schedule}->{$volid} || $cfg->{purge_schedule}->{'*'}
         || $log->logdie("can't get purge schedule for volume id '$volid'!");
     $log->debug("purging for volume $volid");
@@ -192,29 +189,32 @@ for my $volid( keys %$vol_to_snap ) {
     $log->debug("newest snapshot is $newest_id, dated ", $newest);
     my $start_weeks_after = $purgecfg->{hours} + ( $purgecfg->{days} * 24 );
     my $start_months_after = $start_weeks_after + ( $purgecfg->{weeks} * 24 * 7 );
+    my $prev_start_date = DateTime->from_epoch( epoch => 0, time_zone => 'local' )->strftime('%Y-%m-%d');
+    my $start_date;
     for my $snapinfo( @{ $vol_to_snap->{$volid} } ) {
-        $log->debug("considering snapshot $snapinfo->{snapshot_id} dated $snapinfo->{start_time}");
-        my $snap_age_h = int( ( $now->epoch - $snapinfo->{start_time}->epoch ) / (60 * 60) );
-        my $snap_age_d = int( ( $now->epoch - $snapinfo->{start_time}->epoch ) / (24 * 60 * 60) );
+        my $snap_date = $snapinfo->{start_time};
+        $log->debug("considering snapshot $snapinfo->{snapshot_id} dated $snap_date");
+        my $snap_age_h = int( ( $now->epoch - $snap_date->epoch ) / (60*60) );
+        my $snap_age_d = int( ( $now->epoch - $snap_date->epoch ) / (60*60*24) );
         $log->trace("snapshot age in hours is $snap_age_h; in days $snap_age_d");
         my $type;
         my $keep_count = 0;
-        my $start_date;
-        my $prev_start_date = DateTime->from_epoch( time_zone => 'local', epoch => 0 )->strftime('%Y-%m-%d');
         if( $snap_age_h > $purgecfg->{hours} ) {
             if( $snap_age_h <= $start_weeks_after ) {
                 $type = 'days';
-                $start_date = $snapinfo->{start_time}->strftime('%Y-%m-%d');
+                $start_date = $snap_date->clone->set_time_zone( 'local' )->strftime('%Y-%m-%d');
             }
             else {
                 if( $snap_age_h <= $start_months_after ) {
                     $type = 'weeks';
-                    my $dt = $snapinfo->{start_time} - DateTime::Duration->new( days => $snapinfo->{start_time}->dow );
-                    $start_date = $dt->strftime('%Y-%m-%d');
+                    my $week_day = $snap_date->strftime('%w');
+                    my $epoch = $snap_date->epoch - ($week_day * (60*60*24));
+                    my $dt = DateTime->from_epoch( epoch => $epoch );
+                    $start_date = DateTime->from_epoch( epoch => $epoch, time_zone => 'local' )->strftime('%Y-%m-%d');
                 }
                 else {
                     $type = 'months';
-                    my $dt = $snapinfo->{start_time}->clone->truncate( to => 'month' );
+                    my $dt = $snap_date->clone->set_time_zone( 'local' )->truncate( to => 'month' );
                     $start_date = $dt->strftime('%Y-%m-%d');
                 }
             }
@@ -243,16 +243,19 @@ for my $volid( keys %$vol_to_snap ) {
 }
 
 if( @to_del ) {
-    $log->debug("deleting snapshots @to_del");
-    $DB::single = 1;
-    my $rc = $ec2->delete_snapshot( SnapshotId => \@to_del );
-    $rc or error( delete_snapshot => $rc );
-    if( $topic ) {
-        $log->debug("publishing to SNS topic");
-        my $date = scalar localtime( time );
-        $topic->Publish("deleted snapshots @to_del at $date");
-        $log->trace("published to SNS topic");
-    }        
+    for my $snapid( @to_del ) {
+        $log->debug("deleting snapshot $snapid");
+        my $rc = $ec2->delete_snapshot( SnapshotId => $snapid );
+        if( 'Net::Amazon::EC2::Errors' eq ref $rc ) {
+            error( delete_snapshot => $rc );
+        }
+        if( $topic ) {
+            $log->debug("publishing to SNS topic");
+            my $date = scalar localtime( time );
+            $topic->Publish("deleted snapshot $snapid at $date");
+            $log->trace("published to SNS topic");
+        }
+    }
 }
 
 # all done
