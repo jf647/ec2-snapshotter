@@ -77,6 +77,7 @@ my $d = DateTime::Format::Duration->new(
 # create a SNS connection if required
 my $sns;
 my $topic;
+my @notify;
 if( exists $cfg->{sns_notify} ) {
     eval "require Amazon::SNS";
     if( $@ ) {
@@ -151,10 +152,8 @@ for my $volid( @volids ) {
         $log->info("created snapshot ", $newsnap->snapshot_id);
         $refresh_snaps = 1;
         if( $topic ) {
-            $log->debug("publishing to SNS topic");
             my $date = scalar localtime( time );
-            $topic->Publish("created snapshot " . $newsnap->snapshot_id . " of '$volid' at $date");
-            $log->trace("published to SNS topic");
+            push @notify, "created snapshot " . $newsnap->snapshot_id . " of '$volid' at $date";
         }        
     }
 
@@ -250,12 +249,17 @@ if( @to_del ) {
             error( delete_snapshot => $rc );
         }
         if( $topic ) {
-            $log->debug("publishing to SNS topic");
             my $date = scalar localtime( time );
-            $topic->Publish("deleted snapshot $snapid at $date");
-            $log->trace("published to SNS topic");
+            push @notify, "deleted snapshot $snapid at $date";
         }
     }
+}
+
+# send a SNS notification if needed
+if( @notify ) {
+    $log->debug("publishing to SNS topic");
+    $topic->Publish( join("\n", @notify) );
+    $log->trace("published to SNS topic");
 }
 
 # all done
