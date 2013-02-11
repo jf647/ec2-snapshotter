@@ -129,8 +129,10 @@ for my $volid( @volids ) {
     # find the newest snapshot
     my $newest_snaptime;
     my $newest_snap;
+    my $found = 0;
     for my $snap( @$snaps ) {
         next unless( $snap->volume_id eq $volid );
+        $found = 1;
         next if( 'error' eq $snap->status );
         $log->debug("considering snapshot ", $snap->snapshot_id);
         my $snaptime = $f->parse_datetime( $snap->start_time );
@@ -142,19 +144,35 @@ for my $volid( @volids ) {
         }
     }
     
-    # is our newest snapshot too old?
-    my $maxage = $now - DateTime::Duration->new( $snapcfg );
-    $log->debug("newest snapshot is dated $newest_snaptime");
-    $log->debug("oldest allowed snapshot date is $maxage");
-    if( $newest_snaptime < $maxage ) {
-        $log->info("newest snapshot is too old - creating a new one");
+    
+    # if we found a snap, is it too old?
+    if( $found ) {
+        my $maxage = $now - DateTime::Duration->new( $snapcfg );
+        $log->debug("newest snapshot is dated $newest_snaptime");
+        $log->debug("oldest allowed snapshot date is $maxage");
+        if( $newest_snaptime < $maxage ) {
+            $log->info("newest snapshot is too old - creating a new one");
+            my $newsnap = $ec2->create_snapshot( VolumeId => $volid, Description => 'ec2-snapshotter' );
+            $log->info("created snapshot ", $newsnap->snapshot_id);
+            $refresh_snaps = 1;
+            if( $topic ) {
+                my $date = scalar localtime( time );
+                push @notify, "created snapshot " . $newsnap->snapshot_id . " of '$volid' at $date";
+            }        
+        }
+    }
+    
+    # if we didn't find a snap, we need to create one
+    else {
+        $log->info("no snapshot available - creating a new one");
         my $newsnap = $ec2->create_snapshot( VolumeId => $volid, Description => 'ec2-snapshotter' );
         $log->info("created snapshot ", $newsnap->snapshot_id);
         $refresh_snaps = 1;
         if( $topic ) {
             my $date = scalar localtime( time );
             push @notify, "created snapshot " . $newsnap->snapshot_id . " of '$volid' at $date";
-        }        
+        }
+        next;
     }
 
 }
